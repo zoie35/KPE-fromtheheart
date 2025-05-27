@@ -50,7 +50,7 @@ def find_and_read_text_file(directory):
 
     return content
 
-def get_narration_type_to_time_frames_mapping(audio_directory_path, peak_truma_start_time, txt_path):
+def get_narration_type_to_time_frames_mapping(audio_directory_path, txt_path):
     audio_lengths = {NarrationType.TRAUMATIC: None, NarrationType.SAD: None, NarrationType.NEUTRAL: None}
 
     for root, dirs, files in os.walk(audio_directory_path):
@@ -112,9 +112,11 @@ def get_narration_type_to_time_frames_mapping(audio_directory_path, peak_truma_s
 
     return narration_type_to_time_frames_mapping, mapped_narration_type
 
-def print_tsv_time_frames(audio_directory, txt_path,peak_truma_start_time, output_tsv=None):
+#Add GPT function here:
+
+def print_tsv_time_frames(audio_directory, txt_path,peak_trauma_start_time, peak_trauma_duration=30, output_tsv=None):
     print(audio_directory)
-    narration_mapping, mapped_narration_type = get_narration_type_to_time_frames_mapping(audio_directory,peak_truma_start_time, txt_path)
+    narration_mapping, mapped_narration_type = get_narration_type_to_time_frames_mapping(audio_directory, txt_path)
     index_counters = {NarrationType.TRAUMATIC: 0, NarrationType.SAD: 0, NarrationType.NEUTRAL: 0}
 
     lines = ["onset\tduration\ttrial_type"]
@@ -123,11 +125,18 @@ def print_tsv_time_frames(audio_directory, txt_path,peak_truma_start_time, outpu
         idx = index_counters[ntype]
         start_ms, end_ms = narration_mapping[ntype][idx]
         onset_sec = start_ms / 1000.0
+        end_sec = end_ms / 1000.0
+        duration_sec = (end_ms - start_ms) / 1000.0
         trial_type_str = ntype.value.lower()
         if trial_type_str == "traumatic":
             trial_type_str = "trauma"
-        duration_sec = (end_ms - start_ms) / 1000.0
-        lines.append(f"{onset_sec}\t{duration_sec}\t{trial_type_str}")
+        if trial_type_str == "trauma":
+            second_non_peak_trauma_onset = onset_sec + peak_trauma_start_time + peak_trauma_duration
+            lines.append(f"{onset_sec}\t{peak_trauma_start_time}\tnon_peak_trauma")
+            lines.append(f"{onset_sec + peak_trauma_start_time}\t{peak_trauma_duration}\tpeak_trauma")
+            lines.append(f"{second_non_peak_trauma_onset}\t{end_sec - second_non_peak_trauma_onset}\tnon_peak_trauma")
+        else:
+            lines.append(f"{onset_sec}\t{duration_sec}\t{trial_type_str}")
         index_counters[ntype] += 1
 
     subject_id = os.path.basename(audio_directory).split('\\')[0]
@@ -148,8 +157,9 @@ root_dir = r'C:\Users\User\Downloads\subjects'
 subjects = ["672"]
 for subject in subjects:
     print_tsv_time_frames(
-       'C:\\Users\\User\\Downloads\\subjects\\' + subject,
-        'C:\\Users\\User\\Downloads\\subjects\\' + subject,
+       'C:\\Users\\USER\\Desktop\\לימודים\\רפואה\\KPE\\test_data',
+        'C:\\Users\\USER\\Desktop\\לימודים\\רפואה\\KPE\\test_data',
+        42
     )
 # Walk through all subdirectories without printing the root directory itself
 #for subdir, dirs, files in os.walk(root_dir):
