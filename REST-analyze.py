@@ -18,7 +18,7 @@ HIGH_PASS = 0.01
 T_R = 1
 LOW_PASS = 0.08
 DEBUG = True
-project_root = r'C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\amir-shared\amir-shared'
+project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\sub-037-FULL"
 
 def RemoveFirstNVolumes(nifti, num_vol_to_remove):
     print('RemoveFirstNVolumes')
@@ -49,8 +49,6 @@ class FMRIFileSet:
         print(f"Confounds: {self.confounds_path}")
 
 def get_func_files(project_root):
-    bold_keyword = 'bold'
-    confounds_keyword = 'confounds'
     file_sets = []
 
     for subject_folder in os.listdir(project_root):
@@ -66,9 +64,9 @@ def get_func_files(project_root):
                         confounds_file = None
 
                         for file in os.listdir(func_path):
-                            if bold_keyword in file and file.endswith('.nii.gz'):
+                            if 'preproc_bold' in file and 'rest' in file and file.endswith('.nii.gz'):
                                 bold_file = os.path.join(func_path, file)
-                            if confounds_keyword in file and file.endswith('.tsv'):
+                            if 'confounds' in file and 'rest' in file and file.endswith('.tsv'):
                                 confounds_file = os.path.join(func_path, file)
 
                         if bold_file and confounds_file:
@@ -82,9 +80,11 @@ if __name__ == '__main__':
     atlas_labels, atlas_img = GetAtlasAndLabels()
     file_sets = get_func_files(project_root)
     for file_set in file_sets:
+        #file_set.print_info()  #DEBUG
         #Step 1 - remove first NUM_VOL_TO_REMOVE volumes
         nifti_sliced = RemoveFirstNVolumes(nifti = file_set.bold_path, num_vol_to_remove = 4)
-
+        #conf_ - transforms TSV to data file and removes first 4 indexes in order to match bold file
+        conf_ = pd.read_csv(file_set.confounds_path, sep='\t').iloc[4:].reset_index(drop=True)
 
         masker = NiftiLabelsMasker(labels_img=atlas_img, labels=atlas_labels, standardize=STANDARTIZE,
                                    memory='nilearn_cache', verbose=0,
