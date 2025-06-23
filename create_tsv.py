@@ -176,7 +176,7 @@ def write_events_tsv(
         tsv_lines.append(f"{onset_sec:.3f}\t{duration_sec:.3f}\t{trial_type_tag}")
 
     subject_name = os.path.basename(audio_directory).replace("Subject_", "sub-")
-    output_name  = f"{subject_name}_ses-1_events.tsv"
+    output_name  = f"sub-{subject_name}_ses-1.tsv"
 
     with open(output_name, "w", encoding="utf-8") as fh:
         fh.write("\n".join(tsv_lines))

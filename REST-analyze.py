@@ -10,15 +10,20 @@ import pandas as pd
 from nilearn.maskers import NiftiLabelsMasker
 from nilearn import datasets
 import nibabel as nib
+# I WILL SEND YOU LIST OF CONFUNDS - FILTER JUST THE RELEVENT ONE AND MAKE SURE YOU REMOVE THE HEADLINES
+# add also harward oxford subcortex atlas - analyze them togehter
+
 
 STANDARTIZE = 'zscore'
 SMOOTHING_FWHM = 4
 DETREND = True
 HIGH_PASS = 0.01
+REGENERATE_TIME_SERIES = False  # NEW: boolean to control regeneration
 T_R = 1
 LOW_PASS = 0.08
 DEBUG = True
-project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\sub-037-FULL"
+project_root = r"C:\fmri_data"
+csv_dir= ""
 
 def RemoveFirstNVolumes(nifti, num_vol_to_remove):
     print('RemoveFirstNVolumes')
@@ -31,9 +36,9 @@ def RemoveFirstNVolumes(nifti, num_vol_to_remove):
 
 def GetAtlasAndLabels():
     global atlas_img, labels
-    atlas_ho = datasets.fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
-    atlas_img = atlas_ho.maps
-    atlas_labels = atlas_ho.labels
+    atlas_harvard_oxford = datasets.fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
+    atlas_img = atlas_harvard_oxford.maps
+    atlas_labels = atlas_harvard_oxford.labels
     return atlas_labels, atlas_img
 
 class FMRIFileSet:
@@ -76,24 +81,76 @@ def get_func_files(project_root):
     return file_sets
 
 
-if __name__ == '__main__':
+def create_time_series():
     atlas_labels, atlas_img = GetAtlasAndLabels()
     file_sets = get_func_files(project_root)
-    for file_set in file_sets:
-        #file_set.print_info()  #DEBUG
-        #Step 1 - remove first NUM_VOL_TO_REMOVE volumes
-        nifti_sliced = RemoveFirstNVolumes(nifti = file_set.bold_path, num_vol_to_remove = 4)
-        #conf_ - transforms TSV to data file and removes first 4 indexes in order to match bold file
-        conf_ = pd.read_csv(file_set.confounds_path, sep='\t').iloc[4:].reset_index(drop=True)
 
-        masker = NiftiLabelsMasker(labels_img=atlas_img, labels=atlas_labels, standardize=STANDARTIZE,
-                                   memory='nilearn_cache', verbose=0,
-                                   smoothing_fwhm=SMOOTHING_FWHM, detrend=DETREND,
-                                   low_pass=LOW_PASS, high_pass=HIGH_PASS, t_r=T_R)
-        print(f'standardize: {STANDARTIZE}, smoothing_fwhm: {SMOOTHING_FWHM}, detrend: {DETREND}, '
-              f'low_pass: {LOW_PASS}, high_pass: {HIGH_PASS}, t_r: {T_R}')
+    ts_dict = {}  # NEW: {(sub_id, ses_id): DataFrame}
+
+    # create dictionary (subject, session) -> time_series
+    for file_set in file_sets:
+        nifti_sliced = RemoveFirstNVolumes(
+            nifti=file_set.bold_path, num_vol_to_remove=4
+        )
+        conf_ = (
+            pd.read_csv(file_set.confounds_path, sep="\t")
+            .iloc[4:]
+            .reset_index(drop=True)
+        )
+
+        masker = NiftiLabelsMasker(
+            labels_img=atlas_img,
+            labels=atlas_labels,
+            standardize=STANDARTIZE,
+            memory="nilearn_cache",
+            verbose=0,
+            smoothing_fwhm=SMOOTHING_FWHM,
+            detrend=DETREND,
+            low_pass=LOW_PASS,
+            high_pass=HIGH_PASS,
+            t_r=T_R,
+        )
+        print(
+            f"standardize: {STANDARTIZE}, smoothing_fwhm: {SMOOTHING_FWHM}, "
+            f"detrend: {DETREND}, low_pass: {LOW_PASS}, high_pass: {HIGH_PASS}, t_r: {T_R}"
+        )
+
         time_series = masker.fit_transform(nifti_sliced, confounds=conf_)
-        #if (DEBUG):
-           # vs.PlotSeries(series=time_series[:, :], title=set_of_files[0].split('\\')[-1].split('.')[0][:30],
-            #              xlabel='TR', ylabel='zscore')
         df = pd.DataFrame(time_series)
+
+        # save the CSV as before
+        output_file = f"{file_set.subject}_{file_set.session}_time_series.csv"
+        df.to_csv(output_file, index=False)
+
+        # NEW: store in dictionary
+        ts_dict[(file_set.subject, file_set.session)] = df
+
+    return ts_dict  # NEW: return the dictionary
+
+
+def load_files_from_disk(csv_dir="."):
+
+    ts_dict = {}
+    for fname in os.listdir(csv_dir):
+        if fname.endswith('_time_series.csv'):
+            try:
+                subj, sess, *_ = fname.split('_')
+                path = os.path.join(csv_dir, fname)
+                df = pd.read_csv(path)
+
+                ts_dict[(subj, sess)] = df
+                print(f"Loaded {fname} → key=({subj}, {sess}), shape={df.shape}")
+
+            except Exception as e:
+                print(f"Skipping {fname}: {e}")
+
+    return ts_dict
+
+
+if __name__ == '__main__':
+    # get bool parameter from the cmd  generate_time_series
+    if (REGENERATE_TIME_SERIES):
+        print("Regenerating time series...")
+        ts_dict = create_time_series()
+    else:
+        ts_dict = load_files_from_disk()
