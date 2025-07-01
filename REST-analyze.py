@@ -10,23 +10,20 @@ import pandas as pd
 from nilearn.maskers import NiftiLabelsMasker
 from nilearn import datasets
 import nibabel as nib
-# I WILL SEND YOU LIST OF CONFUNDS - FILTER JUST THE RELEVENT ONE AND MAKE SURE YOU REMOVE THE HEADLINES
-# add also harward oxford subcortex atlas - analyze them togehter
 
 
 STANDARTIZE = 'zscore'
 SMOOTHING_FWHM = 4
 DETREND = True
 HIGH_PASS = 0.01
-REGENERATE_TIME_SERIES = False  # NEW: boolean to control regeneration
+REGENERATE_TIME_SERIES = True  # NEW: boolean to control regeneration
 T_R = 1
 LOW_PASS = 0.08
 DEBUG = True
-project_root = r"C:\fmri_data"
-csv_dir= ""
+project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\sub-037-FULL"
+
 
 def RemoveFirstNVolumes(nifti, num_vol_to_remove):
-    print('RemoveFirstNVolumes')
     img = nib.load(nifti)
     data = img.get_fdata()[:, :, :, num_vol_to_remove:]
     img_sliced = nib.Nifti1Image(data, img.affine, img.header)
@@ -34,12 +31,14 @@ def RemoveFirstNVolumes(nifti, num_vol_to_remove):
     nib.nifti1.save(img_sliced, img_sliced_path)"""
     return img_sliced
 
-def GetAtlasAndLabels():
-    global atlas_img, labels
-    atlas_harvard_oxford = datasets.fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
+
+def GetAtlasAndLabels(atlas_type):
+    atlas_harvard_oxford = datasets.fetch_atlas_harvard_oxford(atlas_type)
     atlas_img = atlas_harvard_oxford.maps
     atlas_labels = atlas_harvard_oxford.labels
+
     return atlas_labels, atlas_img
+
 
 class FMRIFileSet:
     def __init__(self, subject, session, bold_path, confounds_path):
@@ -52,6 +51,7 @@ class FMRIFileSet:
         print(f"Subject: {self.subject}, Session: {self.session}")
         print(f"BOLD: {self.bold_path}")
         print(f"Confounds: {self.confounds_path}")
+
 
 def get_func_files(project_root):
     file_sets = []
@@ -81,8 +81,35 @@ def get_func_files(project_root):
     return file_sets
 
 
+def CreateDataFrame(atlas_labels, atlas_img, nifti_sliced, conf_):  # NEW FUNC
+    masker = NiftiLabelsMasker(
+        labels_img=atlas_img,
+        labels=atlas_labels,
+        standardize=STANDARTIZE,
+        memory="nilearn_cache",
+        verbose=0,
+        smoothing_fwhm=SMOOTHING_FWHM,
+        detrend=DETREND,
+        low_pass=LOW_PASS,
+        high_pass=HIGH_PASS,
+        t_r=T_R,
+    )
+    print(
+        f"standardize: {STANDARTIZE}, smoothing_fwhm: {SMOOTHING_FWHM}, "
+        f"detrend: {DETREND}, low_pass: {LOW_PASS}, high_pass: {HIGH_PASS}, t_r: {T_R}"
+    )
+
+    time_series = masker.fit_transform(nifti_sliced, confounds=conf_)
+    # Convert to DataFrame with region names (skipping the 'Background' if needed)
+    region_names = atlas_labels[1:] if atlas_labels[0] == 'Background' else atlas_labels
+    df = pd.DataFrame(time_series, columns=region_names)
+
+    return df
+
+
 def create_time_series():
-    atlas_labels, atlas_img = GetAtlasAndLabels()
+    cort_labels, cort_img = GetAtlasAndLabels('cort-maxprob-thr25-2mm')
+    sub_labels, sub_img = GetAtlasAndLabels('sub-maxprob-thr25-2mm')
     file_sets = get_func_files(project_root)
 
     ts_dict = {}  # NEW: {(sub_id, ses_id): DataFrame}
@@ -92,31 +119,19 @@ def create_time_series():
         nifti_sliced = RemoveFirstNVolumes(
             nifti=file_set.bold_path, num_vol_to_remove=4
         )
-        conf_ = (
-            pd.read_csv(file_set.confounds_path, sep="\t")
-            .iloc[4:]
-            .reset_index(drop=True)
-        )
+        confound_columns = [
+            "trans_x", "trans_y", "trans_z",
+            "rot_x", "rot_y", "rot_z",
+            "std_dvars", "framewise_displacement",
+            "a_comp_cor_00", "a_comp_cor_01", "a_comp_cor_02",
+            "a_comp_cor_03", "a_comp_cor_04", "a_comp_cor_05"
+        ]
+        conf_df = pd.read_csv(file_set.confounds_path, sep="\t")
+        conf_ = conf_df[confound_columns].iloc[4:].reset_index(drop=True)
 
-        masker = NiftiLabelsMasker(
-            labels_img=atlas_img,
-            labels=atlas_labels,
-            standardize=STANDARTIZE,
-            memory="nilearn_cache",
-            verbose=0,
-            smoothing_fwhm=SMOOTHING_FWHM,
-            detrend=DETREND,
-            low_pass=LOW_PASS,
-            high_pass=HIGH_PASS,
-            t_r=T_R,
-        )
-        print(
-            f"standardize: {STANDARTIZE}, smoothing_fwhm: {SMOOTHING_FWHM}, "
-            f"detrend: {DETREND}, low_pass: {LOW_PASS}, high_pass: {HIGH_PASS}, t_r: {T_R}"
-        )
-
-        time_series = masker.fit_transform(nifti_sliced, confounds=conf_)
-        df = pd.DataFrame(time_series)
+        cort_df = CreateDataFrame(cort_labels, cort_img, nifti_sliced, conf_)  # NEW
+        sub_df = CreateDataFrame(sub_labels, sub_img, nifti_sliced, conf_)  # NEW
+        df = pd.concat([cort_df, sub_df], axis=1)
 
         # save the CSV as before
         output_file = f"{file_set.subject}_{file_set.session}_time_series.csv"
@@ -129,7 +144,6 @@ def create_time_series():
 
 
 def load_files_from_disk(csv_dir="."):
-
     ts_dict = {}
     for fname in os.listdir(csv_dir):
         if fname.endswith('_time_series.csv'):
