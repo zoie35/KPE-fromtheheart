@@ -20,7 +20,7 @@ REGENERATE_TIME_SERIES = True  # NEW: boolean to control regeneration
 T_R = 1
 LOW_PASS = 0.08
 DEBUG = True
-project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\sub-037-FULL"
+project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\subX"
 
 
 def RemoveFirstNVolumes(nifti, num_vol_to_remove):
@@ -69,7 +69,7 @@ def get_func_files(project_root):
                         confounds_file = None
 
                         for file in os.listdir(func_path):
-                            if 'preproc_bold' in file and 'rest' in file and file.endswith('.nii.gz'):
+                            if 'preproc_bold' in file and 'rest' in file and 'MNI' in file and file.endswith('.nii.gz'):
                                 bold_file = os.path.join(func_path, file)
                             if 'confounds' in file and 'rest' in file and file.endswith('.tsv'):
                                 confounds_file = os.path.join(func_path, file)
