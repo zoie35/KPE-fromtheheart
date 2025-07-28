@@ -168,3 +168,108 @@ if __name__ == '__main__':
         ts_dict = create_time_series()
     else:
         ts_dict = load_files_from_disk()
+
+        import os
+        import pandas as pd
+        from scipy.stats import ttest_rel
+
+        project_root = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\140725-20250714T170127Z-1-001\140725"
+        output_folder = os.path.join(os.path.dirname(project_root), "t_test_results")
+        os.makedirs(output_folder, exist_ok=True)
+
+
+        def PearsonCorr(project_root):
+            correlation_matrix = {}
+
+            for ts_file in os.listdir(project_root):
+                file_path = os.path.join(project_root, ts_file)
+                df = pd.read_csv(file_path)
+                corr = df.corr()
+                correlation_matrix[ts_file] = corr
+
+            return correlation_matrix
+
+
+        def ROI_Connectivity(correlation_matrix):
+            data = []
+
+            for file_name, df in correlation_matrix.items():
+                lA_lH = df.loc["Left Hippocampus", "Left Amygdala"]
+                rA_rH = df.loc["Right Hippocampus", "Right Amygdala"]
+                lA_vmPFC = df.loc["Frontal Medial Cortex", "Left Amygdala"]
+                rA_vmPFC = df.loc["Frontal Medial Cortex", "Right Amygdala"]
+
+                parts = file_name.replace(".csv", "").split("_")
+                subject = parts[0]  # "sub-X"
+                session = parts[1]  # "ses-MRI1"
+
+                data.append({
+                    "subject": subject,
+                    "session": session,
+                    "lA_lH": lA_lH,
+                    "rA_rH": rA_rH,
+                    "lA_vmPFC": lA_vmPFC,
+                    "rA_vmPFC": rA_vmPFC,
+                })
+
+            ROI_connectivity_df = pd.DataFrame(data)
+            return ROI_connectivity_df
+
+
+        def T_test(df):
+            roi_columns = ["lA_lH", "rA_rH", "lA_vmPFC", "rA_vmPFC"]
+            results = []
+
+            for roi in roi_columns:
+                # --- MRI1 vs MRI2 ---
+                df1 = df[df["session"] == "ses-MRI1"]
+                df2 = df[df["session"] == "ses-MRI2"]
+                df3 = df[df["session"] == "ses-MRI3"]
+
+                common_subs_12 = set(df1["subject"]).intersection(df2["subject"])
+                d1 = df1[df1["subject"].isin(common_subs_12)].sort_values("subject")
+                d2 = df2[df2["subject"].isin(common_subs_12)].sort_values("subject")
+
+                if len(common_subs_12) >= 5:
+                    t_stat, p_val = ttest_rel(d1[roi], d2[roi])
+                    results.append({
+                        "ROI": roi,
+                        "session1": "ses-MRI1",
+                        "session2": "ses-MRI2",
+                        "n_subjects": len(common_subs_12),
+                        "t_stat": t_stat,
+                        "p_value": p_val
+                    })
+
+                # --- MRI1 vs MRI3 ---
+                common_subs_13 = set(df1["subject"]).intersection(df3["subject"])
+                d1b = df1[df1["subject"].isin(common_subs_13)].sort_values("subject")
+                d3 = df3[df3["subject"].isin(common_subs_13)].sort_values("subject")
+
+                if len(common_subs_13) >= 5:
+                    t_stat, p_val = ttest_rel(d1b[roi], d3[roi])
+                    results.append({
+                        "ROI": roi,
+                        "session1": "ses-MRI1",
+                        "session2": "ses-MRI3",
+                        "n_subjects": len(common_subs_13),
+                        "t_stat": t_stat,
+                        "p_value": p_val
+                    })
+
+            return pd.DataFrame(results)
+
+
+        if __name__ == '__main__':
+            Correlation_Matrix = PearsonCorr(project_root)
+            ROI_DataFrame = ROI_Connectivity(Correlation_Matrix)
+            T_test_results = T_test(ROI_DataFrame)
+            output_csv = os.path.join(output_folder, "t test results.csv")
+            T_test_results.to_csv(output_csv, index=False)
+            print(f"results in: {output_csv}")
+
+
+
+
+
+
