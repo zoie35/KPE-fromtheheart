@@ -30,7 +30,7 @@ conf_cols = [
     "a_comp_cor_00", "a_comp_cor_01", "a_comp_cor_02",
     "a_comp_cor_03", "a_comp_cor_04", "a_comp_cor_05",
 ]
-PROJECT_ROOT = r"D:\amir_shared_folder\MRI_scans_K"
+PROJECT_ROOT = r"D:\amir_shared_folder\fmriprep_072025"
 OUTPUT_SUFFIX = "_aal_ts.csv"
 SCRUB_REPORT_CSV = "scrubbing_report.csv"
 
@@ -67,9 +67,10 @@ class FMRIFileSet:
         self.confounds_path = confounds_path
 
     def __repr__(self):
-        print(f"Subject: {self.subject}, Session: {self.session}")
-        print(f"BOLD: {self.bold_path}")
-        print(f"Confounds: {self.confounds_path}")
+        return (f"Subject: {self.subject}, Session: {self.session}\n"
+                f"BOLD: {self.bold_path}\n"
+                f"Confounds: {self.confounds_path}")
+
 
 
 def discover_files(project_root: str) -> List[FMRIFileSet]:
