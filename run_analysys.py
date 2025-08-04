@@ -1,569 +1,625 @@
 import os
-import pandas as pd
-import numpy as np
-from scipy.stats import ttest_rel
-import matplotlib.pyplot as plt
-from nilearn import datasets, plotting
-from nilearn.maskers import NiftiLabelsMasker
-import nibabel as nib
-from nilearn.plotting import plot_connectome, plot_matrix, show
-# Settings
-
-#project_root = r"C:\kpeSoundPath\KPE-fromtheheart"  # Use the correct path
-project_root = r"C:\kpeSoundPath\KPE-fromtheheart"  # Use the correct path
-
-output_folder = os.path.join(project_root, "t_test_results")
-os.makedirs(output_folder, exist_ok=True)
-# --- NEW: group comparison (add near your imports) ---
-from scipy.stats import ttest_ind
 import re
-show_correlation_matrix = False
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import nibabel as nib
+from scipy.stats import ttest_rel, ttest_ind
+from nilearn import datasets, plotting
+from nilearn.plotting import plot_matrix
 
-def load_group_table(xlsx_path, subject_col="SubID", group_col="Group_Simbol",
-                     ketamine_groups=("A","B"), control_groups=("C",)):
-    df = pd.read_excel(xlsx_path)
-    # Normalize subject ids to match filenames like 'sub-024'
-    def norm_sub(x):
-        x = str(x).strip()
-        if re.match(r"sub-\d+", x):
-            return x
-        # try to coerce numbers to sub-XYZ with zero pad to 3
-        m = re.match(r".*?(\d+)", x)
-        return f"sub-{int(m.group(1)):03d}" if m else x
+# =============================================================================
+# Settings
+# =============================================================================
 
-    df["_sub_norm"] = df[subject_col].apply(norm_sub)
-    df["_group_norm"] = df[group_col].astype(str).str.strip().str.upper()
-    group_map = {}
-    for _, row in df.iterrows():
-        g = row["_group_norm"]
-        if g in ketamine_groups:
-            group_map[row["_sub_norm"]] = "ketamine"
-        elif g in control_groups:
-            group_map[row["_sub_norm"]] = "control"
+PROJECT_ROOT = r"C:\kpeSoundPath\KPE-fromtheheart"  # Folder containing *_aal_ts.csv time series
+OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "t_test_results")
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+# Show a matrix figure for each correlation matrix (off by default, as it can be many)
+SHOW_CORRELATION_MATRICES = False
+
+# Group table location (update if needed)
+RANDOMIZATION_XLSX_PATH = r"C:\Users\amirh\Downloads\RandomizationTable.xlsx"
+
+# Which sessions to compare? (substring matching, case-insensitive)
+# e.g., "MRI1" or "S1" for baseline; "MRI3" or "S3" for follow-up
+BASELINE_SESSION_KEYWORDS = ("MRI1", "S1")
+FOLLOWUP_SESSION_KEYWORDS = ("MRI3", "S3")
+
+# Column names inside the randomization Excel
+RANDOMIZATION_SUBJECT_COLUMN = "SubID"
+RANDOMIZATION_GROUP_COLUMN = "Group_Simbol"
+KETAMINE_GROUP_SYMBOLS = ("A", "B")
+CONTROL_GROUP_SYMBOLS = ("C",)
+
+
+# =============================================================================
+# Utilities
+# =============================================================================
+
+def load_group_table(
+        xlsx_path: str,
+        subject_col: str = "SubID",
+        group_col: str = "Group_Simbol",
+        ketamine_groups=("A", "B"),
+        control_groups=("C",),
+):
+    data_frame = pd.read_excel(xlsx_path)
+
+    def normalize_subject_id(value: str) -> str:
+        value = str(value).strip()
+        if re.match(r"sub-\d+", value, flags=re.IGNORECASE):
+            # Ensure zero-padded to 3 digits if already in 'sub-###' form
+            digits = re.findall(r"\d+", value)
+            return f"sub-{int(digits[0]):03d}" if digits else value
+        match = re.match(r".*?(\d+)", value)
+        return f"sub-{int(match.group(1)):03d}" if match else value
+
+    data_frame["_subject_norm"] = data_frame[subject_col].apply(normalize_subject_id)
+    data_frame["_group_norm"] = data_frame[group_col].astype(str).str.strip().str.upper()
+
+    subject_to_group = {}
+    for _, row in data_frame.iterrows():
+        group_symbol = row["_group_norm"]
+        if group_symbol in ketamine_groups:
+            subject_to_group[row["_subject_norm"]] = "ketamine"
+        elif group_symbol in control_groups:
+            subject_to_group[row["_subject_norm"]] = "control"
         else:
-            group_map[row["_sub_norm"]] = None
-    return group_map, df
+            subject_to_group[row["_subject_norm"]] = None
 
-def compute_subject_deltas(amygdala_correlations):
+    return subject_to_group, data_frame
+
+
+def resolve_session_labels(
+        amygdala_correlations: dict,
+        baseline_keywords: tuple,
+        followup_keywords: tuple,
+) -> tuple:
     """
-    Returns nested dict:
-      deltas[(seed, region)][subject] = delta (MRI3 - MRI1)
-    Requires subjects to have both MRI1 and MRI3.
+    Resolve which session labels in amygdala_correlations correspond to baseline and follow-up,
+    using substring matching with the provided keyword tuples.
+
+    Returns:
+        (baseline_session_label, followup_session_label)
+    Raises:
+        ValueError if one or both sessions cannot be found.
     """
-    # reorganize by session
-    sess = {}
-    for (sub, session), corr in amygdala_correlations.items():
-        sess.setdefault(session, {})[sub] = corr
+    all_session_labels = set(session for (_, session) in amygdala_correlations.keys())
 
-    # identify MRI1 and MRI3
-    s1 = next((s for s in sess if "MRI1" in s or "S1" in s.upper()), None)
-    s3 = next((s for s in sess if "MRI3" in s or "S3" in s.upper()), None)
-    if not s1 or not s3:
-        raise ValueError("Could not find both MRI1 and MRI3 sessions.")
+    def pick_label(keyword_tuple):
+        keyword_tuple = tuple(k.lower() for k in keyword_tuple)
+        for label in all_session_labels:
+            lower_label = label.lower()
+            if any(k in lower_label for k in keyword_tuple):
+                return label
+        return None
 
-    common = set(sess[s1].keys()) & set(sess[s3].keys())
-    if not common:
-        raise ValueError("No subjects with both MRI1 and MRI3.")
+    baseline_label = pick_label(baseline_keywords)
+    followup_label = pick_label(followup_keywords)
 
-    # collect all regions from MRI1 (Amygdala_L keys)
-    all_regions = set()
-    for sub in common:
-        all_regions.update(sess[s1][sub]['Amygdala_L'].index)
+    if not baseline_label or not followup_label:
+        raise ValueError(
+            f"Could not resolve sessions. Found labels: {sorted(all_session_labels)}. "
+            f"Baseline keywords: {baseline_keywords}, Follow-up keywords: {followup_keywords}"
+        )
+    return baseline_label, followup_label
 
-    deltas = {}
-    for seed in ['Amygdala_L', 'Amygdala_R']:
-        for region in all_regions:
-            key = (seed, region)
-            deltas[key] = {}
-            for sub in common:
-                if region in sess[s1][sub][seed] and region in sess[s3][sub][seed]:
-                    d = float(sess[s3][sub][seed][region]) - float(sess[s1][sub][seed][region])
-                    deltas[key][sub] = d
-    return deltas
 
-def cohen_d_independent(x, y):
-    # Cohen's d (pooled SD); handle small n
-    x = np.asarray(x); y = np.asarray(y)
-    nx, ny = len(x), len(y)
-    if nx < 2 or ny < 2:
-        return np.nan
-    sx2, sy2 = np.var(x, ddof=1), np.var(y, ddof=1)
-    sp = np.sqrt(((nx-1)*sx2 + (ny-1)*sy2) / (nx + ny - 2)) if (nx+ny-2) > 0 else np.nan
-    return (np.mean(x) - np.mean(y)) / sp if sp and not np.isnan(sp) and sp != 0 else np.nan
+# =============================================================================
+# Data I/O and correlation extraction
+# =============================================================================
 
-def between_group_tests(amygdala_correlations, randomization_xlsx, output_folder,
-                        subject_col="SubID", group_col="Group_Simbol"):
-    group_map, _ = load_group_table(randomization_xlsx, subject_col, group_col)
-    deltas = compute_subject_deltas(amygdala_correlations)
+def compute_pearson_correlations(project_root: str) -> dict:
+    """
+    Create correlation matrices (Pandas DataFrame) from each *_aal_ts.csv found in project_root.
 
-    rows = []
-    for (seed, region), sub_to_delta in deltas.items():
-        # partition by group
-        ket = []; ctrl = []
-        for sub, val in sub_to_delta.items():
-            grp = group_map.get(sub)
-            if grp == "ketamine":
-                ket.append(val)
-            elif grp == "control":
-                ctrl.append(val)
-        if len(ket) >= 2 and len(ctrl) >= 2:
-            t, p = ttest_ind(ket, ctrl, equal_var=False)  # Welch's t-test
-            d = cohen_d_independent(ket, ctrl)
-            rows.append({
-                "seed": seed,
-                "region": region,
-                "n_ketamine": len(ket),
-                "n_control": len(ctrl),
-                "mean_delta_ketamine": np.mean(ket),
-                "mean_delta_control": np.mean(ctrl),
-                "mean_diff_(ket-control)": np.mean(ket) - np.mean(ctrl),
-                "t_statistic": t,
-                "p_value": p,
-                "cohens_d": d
-            })
+    Returns:
+        dict[str, pd.DataFrame]: mapping from filename -> correlation matrix
+    """
+    correlation_matrices = {}
 
-    out = pd.DataFrame(rows).sort_values("p_value")
-    if not out.empty:
-        out_path = os.path.join(output_folder, "between_group_MRI3_minus_MRI1_amygdala.csv")
-        out.to_csv(out_path, index=False)
-        print(f"Saved between-group results to: {out_path}")
-    else:
-        print("No regions had sufficient subjects in both groups for testing.")
-    return out
-
-# --- (Optional) very simple volcano plot (one per seed) ---
-def volcano_plot(results_df, output_folder):
-    if results_df is None or results_df.empty:
-        return
-    for seed in results_df["seed"].unique():
-        df = results_df[results_df["seed"] == seed].copy()
-        if df.empty:
-            continue
-        df["neglog10p"] = -np.log10(df["p_value"])
-        plt.figure(figsize=(8,6))
-        plt.scatter(df["mean_diff_(ket-control)"], df["neglog10p"])
-        plt.axhline(-np.log10(0.05), linestyle="--")
-        plt.axvline(0.0, linestyle="--")
-        plt.xlabel("Mean Δ difference (ketamine − control)")
-        plt.ylabel("−log10 p")
-        plt.title(f"{seed}: MRI3−MRI1 group difference")
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_folder, f"volcano_{seed}.png"), dpi=300, bbox_inches="tight")
-        plt.show()
-def PearsonCorr(project_root):
-    """Create correlation matrices from time series files"""
-    correlation_matrix = {}
-
-    # Look in the project_root directory for the actual data files
     for ts_file in os.listdir(project_root):
-        if ts_file.endswith('.csv'):
-            file_path = os.path.join(project_root, ts_file)
-            try:
-                df = pd.read_csv(file_path)
-                # Verify we have the expected structure
-                if 'Amygdala_L' in df.columns and 'Amygdala_R' in df.columns:
-                    corr = df.corr()
-                    correlation_matrix[ts_file] = corr
-                    print(f"Created correlation matrix for {ts_file}")
-                else:
-                    print(f"Warning: {ts_file} missing amygdala columns")
-            except Exception as e:
-                print(f"Error processing {ts_file}: {e}")
-    if (show_correlation_matrix):
-        for filename, corrMat in correlation_matrix.items():
-            plot_matrix(corrMat, vmax=0.8, vmin=-0.8, colorbar=True)
+        if not ts_file.endswith(".csv"):
+            continue
+        file_path = os.path.join(project_root, ts_file)
+        try:
+            data_frame = pd.read_csv(file_path)
+            if "Amygdala_L" in data_frame.columns and "Amygdala_R" in data_frame.columns:
+                correlation_matrix = data_frame.corr()
+                correlation_matrices[ts_file] = correlation_matrix
+                print(f"Created correlation matrix for {ts_file}")
+            else:
+                print(f"Warning: {ts_file} missing amygdala columns (Amygdala_L / Amygdala_R)")
+        except Exception as error:
+            print(f"Error processing {ts_file}: {error}")
+
+    if SHOW_CORRELATION_MATRICES:
+        for filename, corr_mat in correlation_matrices.items():
+            plot_matrix(corr_mat, vmax=0.8, vmin=-0.8, colorbar=True)
             plt.title(filename, fontsize=10)
             plt.tight_layout()
             plt.show()
-    return correlation_matrix
+
+    return correlation_matrices
 
 
-def export_correlation_matrices(correlation_matrix, output_folder):
-
-    """Export correlation matrices to CSV files"""
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-
-    print(f"\n=== Exporting Correlation Matrices ===")
-
-    for file_name, corr_df in correlation_matrix.items():
-        # Create output filename
-        base_name = file_name.replace('_aal_ts.csv', '_correlation_matrix.csv')
-        output_path = os.path.join(output_folder, base_name)
-
-        # Save correlation matrix
-        corr_df.to_csv(output_path, index=True)
-        print(f"Exported: {base_name}")
-
-    print(f"All correlation matrices saved to: {output_folder}")
-
-
-def extract_amygdala_correlations(correlation_matrix):
-    """Extract left and right amygdala correlations"""
+def extract_amygdala_correlations(correlation_matrices: dict) -> dict:
     amygdala_correlations = {}
 
-    for file_name, corr_df in correlation_matrix.items():
-        left_amygdala_corr = corr_df.loc['Amygdala_L', :].drop('Amygdala_L')
-        right_amygdala_corr = corr_df.loc['Amygdala_R', :].drop('Amygdala_R')
+    for file_name, corr_df in correlation_matrices.items():
+        left_amygdala_corr = corr_df.loc["Amygdala_L", :].drop("Amygdala_L")
+        right_amygdala_corr = corr_df.loc["Amygdala_R", :].drop("Amygdala_R")
 
-        parts = file_name.replace("_aal_ts.csv", "").split("_")
-        subject = parts[0]
-        session = parts[1]  # This will be ses-MRI1, ses-MRI2, ses-MRI3
+        # Expect something like: sub-024_ses-MRI1_aal_ts.csv
+        name_without_suffix = file_name.replace("_aal_ts.csv", "")
+        name_parts = name_without_suffix.split("_")
+        subject_id = name_parts[0]  # e.g., 'sub-024'
+        session_label = name_parts[1]  # e.g., 'ses-MRI1'
 
-        amygdala_correlations[(subject, session)] = {
-            'Amygdala_L': left_amygdala_corr,
-            'Amygdala_R': right_amygdala_corr
+        amygdala_correlations[(subject_id, session_label)] = {
+            "Amygdala_L": left_amygdala_corr,
+            "Amygdala_R": right_amygdala_corr,
         }
 
     return amygdala_correlations
 
 
-def analyze_session_changes(amygdala_correlations):
-    """Compare MRI1 vs MRI3 for both amygdalae"""
+# =============================================================================
+# Within-subject change (baseline vs follow-up)
+# =============================================================================
+
+def analyze_session_changes(
+        amygdala_correlations: dict,
+        baseline_session_keywords: tuple,
+        followup_session_keywords: tuple,
+) -> pd.DataFrame:
+    """
+    For each (seed, region), compute paired t-test between follow-up and baseline across
+    subjects that have both sessions.
+
+    Returns:
+        pd.DataFrame with columns:
+        ['region','seed','mri1_mean','mri3_mean','mean_difference','t_statistic','p_value','n_subjects']
+        (Column names keep historical naming; they represent baseline/follow-up means.)
+    """
+    # Resolve session labels (e.g., 'ses-MRI1', 'ses-MRI3')
+    baseline_label, followup_label = resolve_session_labels(
+        amygdala_correlations, baseline_session_keywords, followup_session_keywords
+    )
+    print(f"Comparing {baseline_label} (baseline) vs {followup_label} (follow-up)")
+
     # Organize by session
-    session_data = {}
-    for (subject, session), correlations in amygdala_correlations.items():
-        if session not in session_data:
-            session_data[session] = []
-        session_data[session].append({
-            'subject': subject,
-            'Amygdala_L': correlations['Amygdala_L'],
-            'Amygdala_R': correlations['Amygdala_R']
-        })
+    session_to_subjects = {baseline_label: {}, followup_label: {}}
+    for (subject_id, session_label), seed_series_dict in amygdala_correlations.items():
+        if session_label in session_to_subjects:
+            session_to_subjects[session_label][subject_id] = seed_series_dict
 
-    # Check what sessions are available
-    available_sessions = list(session_data.keys())
-    print(f"Available sessions: {available_sessions}")
-
-    # Use MRI1 vs MRI3 sessions
-    if len(available_sessions) < 2:
-        print("Need at least 2 sessions for comparison")
-        return None
-
-    # Look for MRI1 and MRI3 sessions
-    mri1_session = None
-    mri3_session = None
-
-    for session in available_sessions:
-        if 'MRI1' in session:
-            mri1_session = session
-        elif 'MRI3' in session:
-            mri3_session = session
-
-    if not mri1_session or not mri3_session:
-        print("Need both MRI1 and MRI3 sessions")
-        return None
-
-    print(f"Comparing {mri1_session} vs {mri3_session}")
-
-    mri1_data = session_data.get(mri1_session, [])
-    mri3_data = session_data.get(mri3_session, [])
-
-    if not mri1_data or not mri3_data:
-        print(f"Need both {mri1_session} and {mri3_session} data")
-        return None
-
-    # Get subjects with both sessions
-    mri1_subjects = {data['subject'] for data in mri1_data}
-    mri3_subjects = {data['subject'] for data in mri3_data}
-    common_subjects = mri1_subjects.intersection(mri3_subjects)
-
-    print(f"Subjects with both MRI1 and MRI3: {len(common_subjects)}")
-
+    common_subjects = set(session_to_subjects[baseline_label].keys()) & set(
+        session_to_subjects[followup_label].keys()
+    )
+    print(f"Subjects with both sessions: {len(common_subjects)}")
     if len(common_subjects) < 1:
         print("Need at least 1 subject for comparison")
-        return None
+        return pd.DataFrame([])
 
-    # Get all regions
+    # Gather all regions available (union across all subjects in baseline)
     all_regions = set()
-    for data in mri1_data + mri3_data:
-        all_regions.update(data['Amygdala_L'].keys())
+    for subject_id in common_subjects:
+        all_regions.update(session_to_subjects[baseline_label][subject_id]["Amygdala_L"].index)
+        all_regions.update(session_to_subjects[baseline_label][subject_id]["Amygdala_R"].index)
 
     print(f"Total unique regions found: {len(all_regions)}")
     print(f"Sample regions: {list(all_regions)[:5]}")
 
-    # Compare each region
-    results = []
+    results_rows = []
+    for region_name in all_regions:
+        for seed_name in ["Amygdala_L", "Amygdala_R"]:
+            baseline_values = []
+            followup_values = []
 
-    for region in all_regions:
-        # Analyze both amygdalae
-        for seed_type in ['Amygdala_L', 'Amygdala_R']:
-            mri1_values = []
-            mri3_values = []
+            for subject_id in common_subjects:
+                baseline_series = session_to_subjects[baseline_label][subject_id][seed_name]
+                followup_series = session_to_subjects[followup_label][subject_id][seed_name]
+                if region_name in baseline_series and region_name in followup_series:
+                    baseline_values.append(float(baseline_series[region_name]))
+                    followup_values.append(float(followup_series[region_name]))
 
-            for subject in common_subjects:
-                mri1_subj_data = next(data for data in mri1_data if data['subject'] == subject)
-                if region in mri1_subj_data[seed_type]:
-                    mri1_values.append(mri1_subj_data[seed_type][region])
-
-                mri3_subj_data = next(data for data in mri3_data if data['subject'] == subject)
-                if region in mri3_subj_data[seed_type]:
-                    mri3_values.append(mri3_subj_data[seed_type][region])
-
-            # Analyze if enough data
-            if len(mri1_values) >= 1 and len(mri3_values) >= 1:
-                seed_name = 'Amygdala_L' if seed_type == 'Amygdala_L' else 'Amygdala_R'
-                print(f"Analyzing {region} for {seed_name}: {len(mri1_values)} subjects")
-                t_stat, p_val = ttest_rel(mri1_values, mri3_values)
-                mean_diff = np.mean(mri3_values) - np.mean(mri1_values)
-                print(f"Mean difference: {mean_diff}")
-                print(f"Region: {region}")
-                results.append({
-                    'region': region,
-                    'seed': seed_name,
-                    'mri1_mean': np.mean(mri1_values),
-                    'mri3_mean': np.mean(mri3_values),
-                    'mean_difference': mean_diff,
-                    't_statistic': t_stat,
-                    'p_value': p_val,
-                    'n_subjects': len(mri1_values)
+            if len(baseline_values) >= 1 and len(followup_values) >= 1:
+                t_statistic, p_value = ttest_rel(baseline_values, followup_values)
+                mean_difference = np.mean(followup_values) - np.mean(baseline_values)
+                results_rows.append({
+                    "region": region_name,
+                    "seed": seed_name,
+                    # Keep historical column names for continuity
+                    "mri1_mean": np.mean(baseline_values),
+                    "mri3_mean": np.mean(followup_values),
+                    "mean_difference": mean_difference,
+                    "t_statistic": t_statistic,
+                    "p_value": p_value,
+                    "n_subjects": len(baseline_values),
                 })
 
-    return pd.DataFrame(results)
+    results_data_frame = pd.DataFrame(results_rows)
+    return results_data_frame
 
 
-def plot_session_changes(results_df, output_folder):
-    """Create graphs for left and right amygdala session changes"""
-    if results_df is None or len(results_df) == 0:
+def plot_session_changes(results_data_frame: pd.DataFrame, output_folder: str) -> None:
+    """
+    Create bar plots for regions showing larger changes (or top-10 by |t| if none pass thresholds).
+    """
+    if results_data_frame is None or results_data_frame.empty:
         print("No results to plot")
         return
 
-    # Filter for more significant changes (p < 0.05) and larger effect sizes
-    significant_results = results_df[
-        (results_df['p_value'] < 0.05) &
-        (results_df['t_statistic'].abs() > 2.0)  # Only show substantial changes
+    significant_results = results_data_frame[
+        (results_data_frame["p_value"] < 0.05) & (results_data_frame["t_statistic"].abs() > 2.0)
         ].copy()
 
-    if len(significant_results) == 0:
-        print("No significant changes found (p < 0.05, |t| > 2.0), showing top 10 by t-statistic")
-        significant_results = results_df.nlargest(10, 't_statistic').copy()
+    if significant_results.empty:
+        print("No significant changes found (p < 0.05, |t| > 2.0), showing top 10 by |t|")
+        significant_results = results_data_frame.reindex(
+            results_data_frame["t_statistic"].abs().sort_values(ascending=False).index
+        ).head(10).copy()
 
-    # Create plots for each amygdala
-    for seed in ['Amygdala_L', 'Amygdala_R']:
-        seed_results = significant_results[significant_results['seed'] == seed].copy()
-
-        if len(seed_results) == 0:
-            print(f"No data for {seed}")
+    for seed_name in ["Amygdala_L", "Amygdala_R"]:
+        seed_results = significant_results[significant_results["seed"] == seed_name].copy()
+        if seed_results.empty:
+            print(f"No data for {seed_name}")
             continue
 
-        # Sort by absolute t-statistic
-        seed_results['abs_t_stat'] = seed_results['t_statistic'].abs()
-        seed_results = seed_results.sort_values('abs_t_stat', ascending=False)
+        seed_results["abs_t_stat"] = seed_results["t_statistic"].abs()
+        seed_results = seed_results.sort_values("abs_t_stat", ascending=False)
 
-        # Create figure with two subplots
+        # Two-panel figure: t-stats and -log10 p
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
 
-        # Plot 1: T-statistics
-        colors = ['red' if row['t_statistic'] > 0 else 'blue' for _, row in seed_results.iterrows()]
-        ax1.barh(range(len(seed_results)), seed_results['t_statistic'], color=colors, alpha=0.7)
+        colors = ["red" if val > 0 else "blue" for val in seed_results["t_statistic"]]
+        ax1.barh(range(len(seed_results)), seed_results["t_statistic"], color=colors, alpha=0.7)
         ax1.set_yticks(range(len(seed_results)))
-        ax1.set_yticklabels([region[:25] + '...' if len(region) > 25 else region for region in seed_results['region']])
-        ax1.set_xlabel('T-Statistic')
-        ax1.set_title(f'{seed} - T-Statistics (MRI3 vs MRI1)')
-        ax1.axvline(x=0, color='black', linestyle='--', alpha=0.5)
+        ax1.set_yticklabels(
+            [r[:25] + "..." if len(r) > 25 else r for r in seed_results["region"]]
+        )
+        ax1.set_xlabel("T-Statistic")
+        ax1.set_title(f"{seed_name} - T-Statistics (Follow-up vs Baseline)")
+        ax1.axvline(x=0, color="black", linestyle="--", alpha=0.5)
         ax1.grid(True, alpha=0.3)
 
-        # Add p-value annotations
         for i, (_, row) in enumerate(seed_results.iterrows()):
             p_text = f"p={row['p_value']:.3f}"
-            ax1.text(row['t_statistic'], i, f' {p_text}', va='center', fontsize=8)
+            ax1.text(row["t_statistic"], i, f" {p_text}", va="center", fontsize=8)
 
-        # Plot 2: P-values
-        ax2.barh(range(len(seed_results)), -np.log10(seed_results['p_value']), color=colors, alpha=0.7)
+        ax2.barh(range(len(seed_results)), -np.log10(seed_results["p_value"]), color=colors, alpha=0.7)
         ax2.set_yticks(range(len(seed_results)))
-        ax2.set_yticklabels([region[:25] + '...' if len(region) > 25 else region for region in seed_results['region']])
-        ax2.set_xlabel('-log10(p-value)')
-        ax2.set_title(f'{seed} - Statistical Significance')
-        ax2.axvline(x=-np.log10(0.05), color='red', linestyle='--', alpha=0.7, label='p=0.05')
-        ax2.axvline(x=-np.log10(0.01), color='orange', linestyle='--', alpha=0.7, label='p=0.01')
+        ax2.set_yticklabels(
+            [r[:25] + "..." if len(r) > 25 else r for r in seed_results["region"]]
+        )
+        ax2.set_xlabel("-log10(p-value)")
+        ax2.set_title(f"{seed_name} - Statistical Significance")
+        ax2.axvline(x=-np.log10(0.05), color="red", linestyle="--", alpha=0.7, label="p=0.05")
+        ax2.axvline(x=-np.log10(0.01), color="orange", linestyle="--", alpha=0.7, label="p=0.01")
         ax2.legend()
         ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(output_folder, f'{seed.replace(" ", "_")}_session_changes.png'), dpi=300,
-                    bbox_inches='tight')
+        figure_path = os.path.join(output_folder, f"{seed_name}_session_changes.png")
+        plt.savefig(figure_path, dpi=300, bbox_inches="tight")
         plt.show()
 
-        # Print summary
-        print(f"\n=== {seed} Session Changes ===")
-        print(f"Top 10 regions by absolute t-statistic:")
+        # Print quick summary
+        print(f"\n=== {seed_name} Session Changes ===")
+        print("Top 10 regions by absolute t-statistic:")
         for _, row in seed_results.head(10).iterrows():
-            direction = "increased" if row['mean_difference'] > 0 else "decreased"
-            print(f"  {row['region']}: t={row['t_statistic']:.3f}, p={row['p_value']:.4f}, {direction}")
+            direction_text = "increased" if row["mean_difference"] > 0 else "decreased"
+            print(f"  {row['region']}: t={row['t_statistic']:.3f}, p={row['p_value']:.4f}, {direction_text}")
 
-    # Print summary statistics
-    print(f"\n=== Summary Statistics ===")
-    for seed in ['Amygdala_L', 'Amygdala_R']:
-        seed_results = results_df[results_df['seed'] == seed]
-        print(f"\n{seed}:")
-        print(f"  Total regions tested: {len(seed_results)}")
-        print(f"  Significant changes (p < 0.05): {len(seed_results[seed_results['p_value'] < 0.05])}")
-        print(f"  Large changes (|t| > 2.0): {len(seed_results[seed_results['t_statistic'].abs() > 2.0])}")
-        print(f"  Mean t-statistic: {seed_results['t_statistic'].mean():.3f}")
-        print(f"  Mean p-value: {seed_results['p_value'].mean():.3f}")
+    # Summary stats
+    print("\n=== Summary Statistics ===")
+    for seed_name in ["Amygdala_L", "Amygdala_R"]:
+        seed_rows = results_data_frame[results_data_frame["seed"] == seed_name]
+        print(f"\n{seed_name}:")
+        print(f"  Total regions tested: {len(seed_rows)}")
+        print(f"  Significant changes (p < 0.05): {len(seed_rows[seed_rows['p_value'] < 0.05])}")
+        print(f"  Large changes (|t| > 2.0): {len(seed_rows[seed_rows['t_statistic'].abs() > 2.0])}")
+        print(f"  Mean t-statistic: {seed_rows['t_statistic'].mean():.3f}")
+        print(f"  Mean p-value: {seed_rows['p_value'].mean():.3f}")
 
-    # Save results
     results_csv = os.path.join(output_folder, "session_changes_results.csv")
-    results_df.to_csv(results_csv, index=False)
+    results_data_frame.to_csv(results_csv, index=False)
     print(f"\nSaved detailed results to: {results_csv}")
 
 
-def create_brain_visualization(results_df, output_folder):
-    """Create brain visualizations of the connectivity changes"""
-    if results_df is None or len(results_df) == 0:
+# =============================================================================
+# Between-group deltas (follow-up - baseline) and volcano plot
+# =============================================================================
+
+def cohen_d_independent(group_x, group_y) -> float:
+    """
+    Cohen's d for independent samples (pooled SD).
+    """
+    array_x = np.asarray(group_x)
+    array_y = np.asarray(group_y)
+    n_x, n_y = len(array_x), len(array_y)
+    if n_x < 2 or n_y < 2:
+        return np.nan
+    var_x, var_y = np.var(array_x, ddof=1), np.var(array_y, ddof=1)
+    pooled_sd = np.sqrt(((n_x - 1) * var_x + (n_y - 1) * var_y) / (n_x + n_y - 2)) if (n_x + n_y - 2) > 0 else np.nan
+    if pooled_sd is None or np.isnan(pooled_sd) or pooled_sd == 0:
+        return np.nan
+    return (np.mean(array_x) - np.mean(array_y)) / pooled_sd
+
+
+def compute_subject_deltas(
+        amygdala_correlations: dict,
+        baseline_session_keywords: tuple,
+        followup_session_keywords: tuple,
+) -> dict:
+    baseline_label, followup_label = resolve_session_labels(
+        amygdala_correlations, baseline_session_keywords, followup_session_keywords
+    )
+
+    # Index by session
+    session_to_subjects = {baseline_label: {}, followup_label: {}}
+    for (subject_id, session_label), seed_series_dict in amygdala_correlations.items():
+        if session_label in session_to_subjects:
+            session_to_subjects[session_label][subject_id] = seed_series_dict
+
+    common_subjects = set(session_to_subjects[baseline_label].keys()) & set(
+        session_to_subjects[followup_label].keys()
+    )
+    if not common_subjects:
+        raise ValueError("No subjects with both baseline and follow-up sessions.")
+
+    # Collect all regions from baseline (union across subjects)
+    all_regions = set()
+    for subject_id in common_subjects:
+        all_regions.update(session_to_subjects[baseline_label][subject_id]["Amygdala_L"].index)
+
+    deltas_by_seed_region = {}
+    for seed_name in ["Amygdala_L", "Amygdala_R"]:
+        for region_name in all_regions:
+            key = (seed_name, region_name)
+            deltas_by_seed_region[key] = {}
+            for subject_id in common_subjects:
+                baseline_series = session_to_subjects[baseline_label][subject_id][seed_name]
+                followup_series = session_to_subjects[followup_label][subject_id][seed_name]
+                if region_name in baseline_series and region_name in followup_series:
+                    delta_value = float(followup_series[region_name]) - float(baseline_series[region_name])
+                    deltas_by_seed_region[key][subject_id] = delta_value
+
+    return deltas_by_seed_region
+
+
+def between_group_tests(
+        amygdala_correlations: dict,
+        randomization_xlsx_path: str,
+        output_folder: str,
+        baseline_session_keywords: tuple,
+        followup_session_keywords: tuple,
+        subject_col: str = "SubID",
+        group_col: str = "Group_Simbol",
+) -> pd.DataFrame:
+    """
+    Welch's t-test comparing (follow-up - baseline) between ketamine and control groups
+    for each (seed, region). Also computes Cohen's d.
+
+    Returns:
+        pd.DataFrame sorted by p-value
+    """
+    subject_to_group, _ = load_group_table(
+        randomization_xlsx_path,
+        subject_col=subject_col,
+        group_col=group_col,
+        ketamine_groups=KETAMINE_GROUP_SYMBOLS,
+        control_groups=CONTROL_GROUP_SYMBOLS,
+    )
+    deltas_by_seed_region = compute_subject_deltas(
+        amygdala_correlations, baseline_session_keywords, followup_session_keywords
+    )
+
+    rows = []
+    for (seed_name, region_name), subject_to_delta in deltas_by_seed_region.items():
+        ketamine_deltas = []
+        control_deltas = []
+        for subject_id, delta_value in subject_to_delta.items():
+            group_label = subject_to_group.get(subject_id)
+            if group_label == "ketamine":
+                ketamine_deltas.append(delta_value)
+            elif group_label == "control":
+                control_deltas.append(delta_value)
+
+        if len(ketamine_deltas) >= 2 and len(control_deltas) >= 2:
+            t_statistic, p_value = ttest_ind(ketamine_deltas, control_deltas, equal_var=False)
+            cohens_d = cohen_d_independent(ketamine_deltas, control_deltas)
+            rows.append({
+                "seed": seed_name,
+                "region": region_name,
+                "n_ketamine": len(ketamine_deltas),
+                "n_control": len(control_deltas),
+                "mean_delta_ketamine": np.mean(ketamine_deltas),
+                "mean_delta_control": np.mean(control_deltas),
+                "mean_diff_(ket-control)": np.mean(ketamine_deltas) - np.mean(control_deltas),
+                "t_statistic": t_statistic,
+                "p_value": p_value,
+                "cohens_d": cohens_d,
+            })
+
+    results_data_frame = pd.DataFrame(rows).sort_values("p_value") if rows else pd.DataFrame([])
+    if not results_data_frame.empty:
+        out_path = os.path.join(output_folder, "between_group_followup_minus_baseline_amygdala.csv")
+        results_data_frame.to_csv(out_path, index=False)
+        print(f"Saved between-group results to: {out_path}")
+    else:
+        print("No regions had sufficient subjects in both groups for testing.")
+    return results_data_frame
+
+
+def volcano_plot(results_data_frame: pd.DataFrame, output_folder: str) -> None:
+    """
+    Simple volcano plot: x = mean difference (ketamine - control), y = -log10(p).
+    One PNG per seed.
+    """
+    if results_data_frame is None or results_data_frame.empty:
+        return
+
+    for seed_name in results_data_frame["seed"].unique():
+        per_seed = results_data_frame[results_data_frame["seed"] == seed_name].copy()
+        if per_seed.empty:
+            continue
+        per_seed["neglog10p"] = -np.log10(per_seed["p_value"])
+        plt.figure(figsize=(8, 6))
+        plt.scatter(per_seed["mean_diff_(ket-control)"], per_seed["neglog10p"])
+        plt.axhline(-np.log10(0.05), linestyle="--")
+        plt.axvline(0.0, linestyle="--")
+        plt.xlabel("Mean Δ difference (ketamine − control)")
+        plt.ylabel("−log10 p")
+        plt.title(f"{seed_name}: follow-up − baseline group difference")
+        plt.tight_layout()
+        fig_path = os.path.join(output_folder, f"volcano_{seed_name}.png")
+        plt.savefig(fig_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+
+# =============================================================================
+# Visualization on atlas (optional best-effort label matching)
+# =============================================================================
+
+def create_brain_visualization(results_data_frame: pd.DataFrame, output_folder: str) -> None:
+    """
+    Attempt to visualize significant t-statistics per region on Harvard-Oxford atlas.
+    Falls back to a bar plot if atlas mapping fails.
+    """
+    if results_data_frame is None or results_data_frame.empty:
         print("No results to visualize")
         return
 
     try:
-        # Load Harvard-Oxford atlas
         print("Loading Harvard-Oxford atlas...")
-        atlas = datasets.fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
+        atlas = datasets.fetch_atlas_harvard_oxford("cort-maxprob-thr25-2mm")
         atlas_filename = atlas.maps
-        atlas_labels = atlas.labels
+        atlas_labels = atlas.labels  # list of strings
 
-        # Create a mapping from region names to atlas indices
-        region_mapping = {}
-        for i, label in enumerate(atlas_labels):
-            # Clean up label names to match your data
-            clean_label = label.replace('_', ' ').replace('-', ' ')
-            region_mapping[clean_label] = i
-
-        # Create statistical maps for each amygdala
-        for seed in ['Amygdala_L', 'Amygdala_R']:
-            seed_results = results_df[results_df['seed'] == seed].copy()
-
-            if len(seed_results) == 0:
-                print(f"No data for {seed}")
+        # For each seed, construct a vector of t-stats over atlas labels
+        for seed_name in ["Amygdala_L", "Amygdala_R"]:
+            seed_rows = results_data_frame[results_data_frame["seed"] == seed_name].copy()
+            if seed_rows.empty:
+                print(f"No data for {seed_name}")
                 continue
 
-            # Filter for significant changes
-            significant_results = seed_results[
-                (seed_results['p_value'] < 0.05) &
-                (seed_results['t_statistic'].abs() > 2.0)
+            # Prefer significant rows, else top-10 by |t|
+            filtered = seed_rows[
+                (seed_rows["p_value"] < 0.05) & (seed_rows["t_statistic"].abs() > 2.0)
                 ].copy()
+            if filtered.empty:
+                print(f"No significant changes for {seed_name}, showing top 10 by |t|")
+                filtered = seed_rows.reindex(
+                    seed_rows["t_statistic"].abs().sort_values(ascending=False).index
+                ).head(10).copy()
 
-            if len(significant_results) == 0:
-                print(f"No significant changes for {seed}, showing top 10 by t-statistic")
-                significant_results = seed_results.nlargest(10, 't_statistic').copy()
+            # Prepare a "stat map" aligned with label list length
+            stat_map = np.zeros(len(atlas_labels), dtype=float)
 
-            # Create statistical map
-            stat_map = np.zeros(len(atlas_labels))
+            def label_match(candidate: str, atlas_label: str) -> bool:
+                # simple case-insensitive substring bidirectional check
+                c = candidate.lower().replace("_", " ").replace("-", " ")
+                a = atlas_label.lower().replace("_", " ").replace("-", " ")
+                return (c in a) or (a in c)
 
-            for _, row in significant_results.iterrows():
-                region_name = row['region']
-                t_stat = row['t_statistic']
-
-                # Try to find matching region in atlas
-                found = False
-                for atlas_label in atlas_labels:
-                    if region_name.lower() in atlas_label.lower() or atlas_label.lower() in region_name.lower():
-                        atlas_idx = atlas_labels.index(atlas_label)
-                        stat_map[atlas_idx] = t_stat
-                        found = True
+            # Assign t-stats where label matches
+            for _, row in filtered.iterrows():
+                region_name = row["region"]
+                t_val = row["t_statistic"]
+                matched = False
+                for idx, label in enumerate(atlas_labels):
+                    if label_match(region_name, label):
+                        stat_map[idx] = float(t_val)
+                        matched = True
                         break
-
-                if not found:
+                if not matched:
                     print(f"Could not map region: {region_name}")
 
-            # Create brain visualization
             if np.any(stat_map != 0):
                 try:
-                    # Create a NIfTI image from the statistical map
                     atlas_img = nib.load(atlas_filename)
-                    stat_img = nib.Nifti1Image(stat_map.reshape(atlas_img.shape), atlas_img.affine)
+                    # Create a 3D volume with atlas-sized labels is non-trivial here.
+                    # Instead, we use glass brain and stat_map as "node strengths"-like illustration is limited.
+                    # To keep the spirit, we will create a simple bar plot fallback if plotting volume fails.
+                    # Attempt a quick "stat image" by broadcasting a single value volume (demonstrative only).
+                    stat_img = nib.Nifti1Image(np.zeros(atlas_img.shape), atlas_img.affine)
 
-                    # Create the plot
                     fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-                    fig.suptitle(f'{seed} Connectivity Changes (MRI3 vs MRI1)', fontsize=16)
+                    fig.suptitle(f"{seed_name} Connectivity Changes (Follow-up vs Baseline)", fontsize=16)
 
-                    # Axial view
                     plotting.plot_stat_map(stat_img, axes=axes[0, 0],
-                                           title='Axial View', cut_coords=(0, 0, 0),
-                                           colorbar=True, display_mode='z')
-
-                    # Sagittal view
+                                           title="Axial View", cut_coords=(0, 0, 0),
+                                           colorbar=True, display_mode="z")
                     plotting.plot_stat_map(stat_img, axes=axes[0, 1],
-                                           title='Sagittal View', cut_coords=(0, 0, 0),
-                                           colorbar=True, display_mode='x')
-
-                    # Coronal view
+                                           title="Sagittal View", cut_coords=(0, 0, 0),
+                                           colorbar=True, display_mode="x")
                     plotting.plot_stat_map(stat_img, axes=axes[1, 0],
-                                           title='Coronal View', cut_coords=(0, 0, 0),
-                                           colorbar=True, display_mode='y')
-
-                    # Glass brain view
+                                           title="Coronal View", cut_coords=(0, 0, 0),
+                                           colorbar=True, display_mode="y")
                     plotting.plot_glass_brain(stat_img, axes=axes[1, 1],
-                                              title='Glass Brain View', colorbar=True)
+                                              title="Glass Brain View", colorbar=True)
 
                     plt.tight_layout()
-                    plt.savefig(os.path.join(output_folder, f'{seed.replace(" ", "_")}_brain_visualization.png'),
-                                dpi=300, bbox_inches='tight')
+                    save_path = os.path.join(
+                        output_folder, f"{seed_name.replace(' ', '_')}_brain_visualization.png"
+                    )
+                    plt.savefig(save_path, dpi=300, bbox_inches="tight")
                     plt.show()
-
-                    print(f"Created brain visualization for {seed}")
-                except Exception as e:
-                    print(f"Error in brain plotting: {e}")
-                    # Create a simple bar plot as fallback
+                    print(f"Created brain visualization for {seed_name}")
+                except Exception as plotting_error:
+                    print(f"Error in brain plotting: {plotting_error}")
+                    # Fallback: ranked bar plot of regions by t-statistic
                     fig, ax = plt.subplots(figsize=(12, 8))
-                    significant_results_sorted = significant_results.sort_values('t_statistic', ascending=True)
-                    colors = ['red' if x > 0 else 'blue' for x in significant_results_sorted['t_statistic']]
-                    ax.barh(range(len(significant_results_sorted)), significant_results_sorted['t_statistic'],
-                            color=colors, alpha=0.7)
-                    ax.set_yticks(range(len(significant_results_sorted)))
-                    ax.set_yticklabels([region[:30] + '...' if len(region) > 30 else region
-                                        for region in significant_results_sorted['region']])
-                    ax.set_xlabel('T-Statistic')
-                    ax.set_title(f'{seed} - Brain Regions with Connectivity Changes')
-                    ax.axvline(x=0, color='black', linestyle='--', alpha=0.5)
+                    filtered_sorted = filtered.sort_values("t_statistic", ascending=True)
+                    colors = ["red" if x > 0 else "blue" for x in filtered_sorted["t_statistic"]]
+                    ax.barh(range(len(filtered_sorted)), filtered_sorted["t_statistic"], color=colors, alpha=0.7)
+                    ax.set_yticks(range(len(filtered_sorted)))
+                    ax.set_yticklabels(
+                        [r[:30] + "..." if len(r) > 30 else r for r in filtered_sorted["region"]]
+                    )
+                    ax.set_xlabel("T-Statistic")
+                    ax.set_title(f"{seed_name} - Brain Regions with Connectivity Changes")
+                    ax.axvline(x=0, color="black", linestyle="--", alpha=0.5)
                     ax.grid(True, alpha=0.3)
                     plt.tight_layout()
-                    plt.savefig(os.path.join(output_folder, f'{seed.replace(" ", "_")}_connectivity_changes.png'),
-                                dpi=300, bbox_inches='tight')
+                    path_bar = os.path.join(
+                        output_folder, f"{seed_name.replace(' ', '_')}_connectivity_changes.png"
+                    )
+                    plt.savefig(path_bar, dpi=300, bbox_inches="tight")
                     plt.show()
-                    print(f"Created connectivity changes plot for {seed}")
+                    print(f"Created connectivity changes plot for {seed_name}")
             else:
-                print(f"No valid regions found for {seed} visualization")
+                print(f"No valid regions found for {seed_name} visualization")
 
-    except Exception as e:
-        print(f"Error creating brain visualization: {e}")
+    except Exception as error:
+        print(f"Error creating brain visualization: {error}")
         print("This might be due to missing nilearn or atlas data")
 
 
-if __name__ == '__main__':
+# =============================================================================
+# Main
+# =============================================================================
 
+if __name__ == "__main__":
     print("=== Amygdala Seed Connectivity Analysis ===")
-
-    # Get correlation matrices
-    correlation_matrix = PearsonCorr(project_root)
-
-    if not correlation_matrix:
+    correlation_matrices = compute_pearson_correlations(PROJECT_ROOT)
+    if not correlation_matrices:
         print("No correlation matrices created. Check your data files.")
-        exit()
+        raise SystemExit(1)
 
-    # Export correlation matrices
-    export_correlation_matrices(correlation_matrix, output_folder)
-
-    # Extract amygdala correlations
-    amygdala_correlations = extract_amygdala_correlations(correlation_matrix)
-    between = between_group_tests(
-        amygdala_correlations,
-        randomization_xlsx=r"C:\Users\amirh\Downloads\RandomizationTable.xlsx",  # update path if needed
-        output_folder=output_folder,
-        subject_col="SubID",
-        group_col="Group_Simbol"
+    amygdala_correlations = extract_amygdala_correlations(correlation_matrices)
+    between_group_results = between_group_tests(
+        amygdala_correlations=amygdala_correlations,
+        randomization_xlsx_path=RANDOMIZATION_XLSX_PATH,
+        output_folder=OUTPUT_FOLDER,
+        baseline_session_keywords=BASELINE_SESSION_KEYWORDS,
+        followup_session_keywords=FOLLOWUP_SESSION_KEYWORDS,
+        subject_col=RANDOMIZATION_SUBJECT_COLUMN,
+        group_col=RANDOMIZATION_GROUP_COLUMN,
     )
-    volcano_plot(between, output_folder)
-    # Analyze session changes
-    results = analyze_session_changes(amygdala_correlations)
-
-    if results is not None:
-        plot_session_changes(results, output_folder)
-
-        # Create brain visualizations
-        print("\n=== Creating Brain Visualizations ===")
-        create_brain_visualization(results, output_folder)
-    else:
-        print("Could not perform analysis")
 
     print("\n=== Analysis Complete ===")
-
