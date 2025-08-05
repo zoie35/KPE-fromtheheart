@@ -39,6 +39,7 @@ os.environ.setdefault("NILEARN_DATA", r"C:\Users\amirh\Documents\nilearn_cache")
 # Thresholds for motion warnings
 FD_THRESHOLD = 0.5
 DVARS_THRESHOLD = 1.5
+scrubbed_volumes_threshold = 0.2
 
 # For reporting
 scrub_stats = []
@@ -165,6 +166,10 @@ def create_time_series(project_root: str) -> Dict[Tuple[str, str], pd.DataFrame]
         print(f"Processing {fs}")
         img_sliced = remove_first_n_volumes(fs.bold_path, NUM_VOLS_TO_REMOVE)
         conf_df = build_confounds(fs.confounds_path, fs.subject, fs.session)
+        # Check scrubbed_volumes threshold
+        if scrub_stats[-1]["scrubbed_volumes"] > (scrubbed_volumes_threshold * 580):
+            print(f"Skipping {fs.subject} {fs.session} due to excessive scrubbing ({scrub_stats[-1]['scrubbed_volumes']} volumes)")
+            continue
         df = extract_time_series(img_sliced, atlas_img, labels, conf_df)
 
         out_name = f"{fs.subject}_{fs.session}{OUTPUT_SUFFIX}"
