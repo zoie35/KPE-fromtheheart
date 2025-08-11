@@ -9,18 +9,21 @@ from nilearn import datasets, plotting
 from nilearn.plotting import plot_matrix
 
 # =============================================================================
-# Settings
+# Message to me - for some reason it prints out MRI2 as well some times so lets
+# check whats that about it should compare only 1 to 3
+# and then lets run it again after ideleted the scrubbed volumes
+# enjoy
 # =============================================================================
 
-PROJECT_ROOT = r"C:\kpeSoundPath\KPE-fromtheheart"  # Folder containing *_aal_ts.csv time series
-OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "t_test_results")
+PROJECT_ROOT = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\new_data"  # Folder containing *_aal_ts.csv time series
+OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "t_test_ses_1_3")
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # Show a matrix figure for each correlation matrix (off by default, as it can be many)
 SHOW_CORRELATION_MATRICES = False
 
 # Group table location (update if needed)
-RANDOMIZATION_XLSX_PATH = r"C:\Users\amirh\Downloads\RandomizationTable.xlsx"
+RANDOMIZATION_XLSX_PATH = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\RandomizationTable.xlsx"
 
 # Which sessions to compare? (substring matching, case-insensitive)
 # e.g., "MRI1" or "S1" for baseline; "MRI3" or "S3" for follow-up
@@ -30,7 +33,7 @@ FOLLOWUP_SESSION_KEYWORDS = ("MRI3", "S3")
 # Column names inside the randomization Excel
 RANDOMIZATION_SUBJECT_COLUMN = "SubID"
 RANDOMIZATION_GROUP_COLUMN = "Group_Simbol"
-KETAMINE_GROUP_SYMBOLS = ("A", "B")
+KETAMINE_GROUP_SYMBOLS = ("A")
 CONTROL_GROUP_SYMBOLS = ("C",)
 
 
@@ -623,3 +626,33 @@ if __name__ == "__main__":
     )
 
     print("\n=== Analysis Complete ===")
+
+
+top10 = between_group_results.sort_values("p_value").head(11)
+print(top10)
+
+    # Prepare plot
+plt.figure(figsize=(10, 6))
+colors = ["red" if diff > 0 else "blue" for diff in top10["mean_diff_(ket-control)"]]
+
+plt.barh(top10["region"], -np.log10(top10["p_value"]), color=colors)
+plt.xlabel("-log10(p-value)")
+plt.ylabel("Region")
+plt.title("Top 10 Regions by Significance (Between-Group Δ)")
+plt.gca().invert_yaxis()  # smallest p-value at the top
+plt.grid(True, axis="x", alpha=0.3)
+
+    # Annotate bars with actual p-values
+for i, p in enumerate(top10["p_value"]):
+    plt.text(-np.log10(p) + 0.05, i, f"p={p:.3e}", va="center", fontsize=8)
+
+plt.tight_layout()
+
+output_path = os.path.join(OUTPUT_FOLDER, "top10_between_group.png")
+plt.savefig(output_path, dpi=300, bbox_inches="tight")
+plt.show()
+
+print(f"Saved top 10 plot to: {output_path}")
+
+
+
