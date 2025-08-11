@@ -9,37 +9,55 @@ from nilearn import datasets, plotting
 from nilearn.plotting import plot_matrix
 
 # =============================================================================
-# Message to me - for some reason it prints out MRI2 as well some times so lets
-# check whats that about it should compare only 1 to 3
-# and then lets run it again after ideleted the scrubbed volumes
-# enjoy
+# It yields, yet remains whole Roots in the earth, spirit in the sky
 # =============================================================================
+scrubbed_volumes_threshold = 115
 
-PROJECT_ROOT = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\new_data"  # Folder containing *_aal_ts.csv time series
-OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "t_test_ses_1_3")
+PROJECT_ROOT = r"C:\aaf-files"  # Folder containing *_aal_ts.csv time series
+OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "t_test_results")
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 # Show a matrix figure for each correlation matrix (off by default, as it can be many)
 SHOW_CORRELATION_MATRICES = False
 
 # Group table location (update if needed)
-RANDOMIZATION_XLSX_PATH = r"C:\Users\USER\Desktop\לימודים\רפואה\מעבדה\KPE\RandomizationTable.xlsx"
+RANDOMIZATION_XLSX_PATH = "C:/Users/amirh/Downloads/RandomizationTable.xlsx"
+report_path = "C:/AALpath/sub-987_ses-MRI1_aal_ts/scrubbing_report.csv"
 
 # Which sessions to compare? (substring matching, case-insensitive)
 # e.g., "MRI1" or "S1" for baseline; "MRI3" or "S3" for follow-up
 BASELINE_SESSION_KEYWORDS = ("MRI1", "S1")
-FOLLOWUP_SESSION_KEYWORDS = ("MRI3", "S3")
+FOLLOWUP_SESSION_KEYWORDS = ("MRI2", "S2")
 
 # Column names inside the randomization Excel
 RANDOMIZATION_SUBJECT_COLUMN = "SubID"
 RANDOMIZATION_GROUP_COLUMN = "Group_Simbol"
 KETAMINE_GROUP_SYMBOLS = ("A")
-CONTROL_GROUP_SYMBOLS = ("C",)
+CONTROL_GROUP_SYMBOLS = ("C")
 
 
 # =============================================================================
 # Utilities
 # =============================================================================
+def filter_correlation_matrices_by_fd_motion_threshold(report_path, correlation_matrices):
+    scrub_report =  pd.read_csv(report_path)
+    over_scrubbed_volumes = scrub_report[scrub_report["scrubbed_volumes"] > scrubbed_volumes_threshold]
+    subject_and_session_to_delete = set(zip(over_scrubbed_volumes["subject"], over_scrubbed_volumes["session"]))
+    def parse_subject_session(key):
+        base = os.path.basename(key).replace("_aal_ts.csv", "")
+        parts = base.split("_")
+        return parts[0], parts[1]  # ('sub-010', 'ses-MRI1')
+
+    deleted_str = "none" if not subject_and_session_to_delete else ", ".join(
+        f"{sub}_{ses}" for sub, ses in sorted(subject_and_session_to_delete)
+    )
+    print(f"Deleted subjects and session: {deleted_str}")
+
+    return {
+        key: mat
+        for key, mat in correlation_matrices.items()
+        if (parse_subject_session(key) not in subject_and_session_to_delete)
+    }
 
 def load_group_table(
         xlsx_path: str,
@@ -606,10 +624,44 @@ def create_brain_visualization(results_data_frame: pd.DataFrame, output_folder: 
 # =============================================================================
 # Main
 # =============================================================================
+def plot_between_group_top_regions(between_group_results):
+    for seed_val, group_df in between_group_results.groupby("seed"):
+        top_10_regions = group_df.sort_values("p_value").head(10).copy()
+        colors = ["red" if diff > 0 else "blue" for diff in top_10_regions["mean_diff_(ket-control)"]]
+
+        plt.figure(figsize=(10, 6))
+        bars = plt.barh(top_10_regions["region"], -np.log10(top_10_regions["p_value"]), color=colors)
+        plt.xlabel("-log10(p-value)")
+        plt.ylabel("Region")
+        plt.title(f"Top 10 Regions by Significance ({seed_val})")
+        plt.gca().invert_yaxis()
+        plt.grid(True, axis="x", alpha=0.3)
+
+        # Annotate bars with actual p-values
+        for i, p in enumerate(top_10_regions["p_value"]):
+            plt.text(-np.log10(p) + 0.05, i, f"p={p:.3e}", va="center", fontsize=8)
+
+        # Add legend for colors
+        from matplotlib.patches import Patch
+        legend_elements = [
+            Patch(facecolor='red', label='Ketamine Δ > Control Δ'),
+            Patch(facecolor='blue', label='Ketamine Δ < Control Δ')
+        ]
+        plt.legend(handles=legend_elements, title="Group difference", loc="lower right")
+
+        plt.tight_layout()
+        output_path = os.path.join(OUTPUT_FOLDER, f"top10_between_group_{seed_val}.png")
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        plt.show()
+
+        print(f"Saved plot for {seed_val} to: {output_path}")
+
 
 if __name__ == "__main__":
     print("=== Amygdala Seed Connectivity Analysis ===")
     correlation_matrices = compute_pearson_correlations(PROJECT_ROOT)
+    filtered_correlation_matrices = filter_correlation_matrices_by_fd_motion_threshold(report_path,
+                                                                                       correlation_matrices)
     if not correlation_matrices:
         print("No correlation matrices created. Check your data files.")
         raise SystemExit(1)
@@ -624,35 +676,5 @@ if __name__ == "__main__":
         subject_col=RANDOMIZATION_SUBJECT_COLUMN,
         group_col=RANDOMIZATION_GROUP_COLUMN,
     )
-
+    plot_between_group_top_regions(between_group_results)
     print("\n=== Analysis Complete ===")
-
-
-top10 = between_group_results.sort_values("p_value").head(11)
-print(top10)
-
-    # Prepare plot
-plt.figure(figsize=(10, 6))
-colors = ["red" if diff > 0 else "blue" for diff in top10["mean_diff_(ket-control)"]]
-
-plt.barh(top10["region"], -np.log10(top10["p_value"]), color=colors)
-plt.xlabel("-log10(p-value)")
-plt.ylabel("Region")
-plt.title("Top 10 Regions by Significance (Between-Group Δ)")
-plt.gca().invert_yaxis()  # smallest p-value at the top
-plt.grid(True, axis="x", alpha=0.3)
-
-    # Annotate bars with actual p-values
-for i, p in enumerate(top10["p_value"]):
-    plt.text(-np.log10(p) + 0.05, i, f"p={p:.3e}", va="center", fontsize=8)
-
-plt.tight_layout()
-
-output_path = os.path.join(OUTPUT_FOLDER, "top10_between_group.png")
-plt.savefig(output_path, dpi=300, bbox_inches="tight")
-plt.show()
-
-print(f"Saved top 10 plot to: {output_path}")
-
-
-
